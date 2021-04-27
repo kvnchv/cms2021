@@ -1,0 +1,119 @@
+log         {NAME}.log
+echo		both
+units       metal
+dimension    3
+boundary     p p m
+timestep    0.004
+
+atom_style     cac 8 4
+comm_style	cac
+newton off
+
+read_data	../relaxed_400.cac #extra/atom/types 3
+
+##----------- dimension definitions ------------
+variable      a equal 3.66
+variable      b equal 'v_a * sqrt(2) / 2'
+variable      dz equal 'v_a / sqrt(3)'
+variable	dt equal 5.8
+
+
+variable      lx equal lx
+variable      ly equal ly
+variable      lz equal lz
+
+variable      yup equal '.97*ly'
+variable      ybot equal '.03*ly'
+variable      zup equal 'lz-v_dt'
+variable      zbot equal 'v_dt'
+variable      zmid equal '0.5*lz'
+variable      zpartup equal '0.6*lz'
+variable      zpartbot equal '0.4*lz'
+
+variable      nplane equal 8
+
+variable      zelo equal 'v_zmid - v_nplane*v_dz'
+variable      zehi equal 'v_zmid + v_nplane*v_dz'
+
+region	      1 block EDGE EDGE EDGE EDGE ${zelo} ${zehi}
+group		AT region 1
+
+######## Create freeze layers
+region      SKINr block INF INF INF INF ${zbot} ${zup} side out
+region      upper block INF INF INF INF ${zup} INF
+region      lower block INF INF INF INF INF ${zbot}
+group		upper region upper
+group		lower region lower
+group       SKIN  region SKINr
+group	    MIDDLE subtract all SKIN
+####### Create partial thermostat boundary
+group		THERMOPART subtract MIDDLE AT
+
+##----------- alloy settings -------------------
+pair_style 	cac/eam/alloy/interp one
+pair_coeff  * * {POT} Fe Ni Cr Av
+variable  fNi equal {FNI}
+variable  fCr equal "0.3 - v_fNi"
+
+# First set all to A atom
+set       group all cac/type 4
+# Then select pure atom region for setting random types
+set	  group AT cac/type 1
+
+variable  s1 equal {SEED}
+variable  s2 equal "v_s1+1234"
+set       type 1 cac/type/fraction 2 $(v_fNi + v_fCr) ${s1}
+set       type 2 cac/type/fraction 3 $(v_fCr/(v_fCr+v_fNi)) ${s2}
+
+#required to weight the elements and load balance non-uniform meshes
+compute Eweight all cac/quad/count
+variable Eweights atom c_Eweight
+fix comm all balance 10000 1.00 rcb weight var Eweights
+
+
+
+########### dynamically equilibrate at target temperature
+
+reset_timestep 0
+velocity/cac MIDDLE create 100.0 1234567 dist gaussian loop geom
+run 0
+velocity/cac MIDDLE scale 100.0
+velocity/cac upper set 0.0 0.0 0.0 units box
+velocity/cac lower set 0.0 0.0 0.0 units box
+
+compute  Ntemp MIDDLE cac/nodal/temp
+thermo		1000
+thermo_style custom time cpu step pe ke press vol temp c_Ntemp
+
+#### boundaries
+fix FREEZE1 upper cac/setforce NULL NULL 0.
+fix FREEZE2 lower cac/setforce NULL NULL 0.
+fix INTEGRATE1 upper cac/nve
+fix INTEGRATE2 lower cac/nve
+
+#### mobile region
+fix INTEGRATE3 MIDDLE cac/nve
+fix TEMP MIDDLE cac/temp/csvr 100. 100. $(200*dt) ${s1}
+run 2000
+
+
+######## calculate shear stress
+variable	tau equal {STRESS}e6 # Pa
+variable	conv equal 6.242e-12 # Pa to ev/A^3
+variable	planeA equal 'lx*ly'
+variable	ntop equal count(upper)
+variable	nbot equal count(lower)
+variable	fv equal 'v_tau*v_conv*v_planeA'
+variable	fvu equal 'v_fv/v_ntop/2'
+variable	fvl equal '-v_fv/v_nbot/2'
+fix		upperf1 upper cac/addforce 0. ${fvu} 0. 
+fix		lowerf1 lower cac/addforce 0. ${fvl} 0. 
+
+######## reset and run
+reset_timestep 0
+dump		8 all cfg		  5000 force*.cfg mass type xs ys zs id
+dump_modify 8 element 26 28 24 25
+
+thermo		1000
+thermo_style custom time cpu step pe ke press vol temp c_Ntemp
+run		500000
